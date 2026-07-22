@@ -99,7 +99,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let field_types = field_entries.iter().map(|(_, t)| t);
 
     let expanded = quote! {
-        impl ferrumec_admin::entity::Entity for #name {
+        impl actixutils::viewset::Entity for #name {
             type Id = uuid::Uuid;
             type CreateDto = #create_ty;
             type UpdateDto = #update_ty;
@@ -108,7 +108,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             const TABLE: &'static str = #table;
             const PK_COLUMN: &'static str = #pk_column;
             const COLUMNS: &'static [&'static str] = &[#(#columns),*];
-            const FIELDS: &'static [ferrumec_admin::sql::Field] =
+            const FIELDS: &'static [actixutils::viewset::Field] =
                 &[#((#field_names, #field_types)),*];
             const SEARCHABLE: &'static [&'static str] = &[#(#searchable),*];
             const SORTABLE: &'static [&'static str] = &[#(#sortable),*];
@@ -137,23 +137,23 @@ fn sql_type_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
     };
 
     match last_ident.as_deref() {
-        Some("String") | Some("str") => quote! { ferrumec_admin::sql::SqlType::Text },
+        Some("String") | Some("str") => quote! { actixutils::viewset::SqlType::Text },
         Some("i8") | Some("i16") | Some("i32") | Some("u8") | Some("u16") | Some("u32") => {
-            quote! { ferrumec_admin::sql::SqlType::Int4 }
+            quote! { actixutils::viewset::SqlType::Int4 }
         }
         Some("i64") | Some("u64") | Some("isize") | Some("usize") => {
-            quote! { ferrumec_admin::sql::SqlType::Int8 }
+            quote! { actixutils::viewset::SqlType::Int8 }
         }
-        Some("f32") => quote! { ferrumec_admin::sql::SqlType::Float4 },
-        Some("f64") => quote! { ferrumec_admin::sql::SqlType::Float8 },
-        Some("bool") => quote! { ferrumec_admin::sql::SqlType::Bool },
-        Some("Uuid") => quote! { ferrumec_admin::sql::SqlType::Uuid },
-        Some("NaiveDate") => quote! { ferrumec_admin::sql::SqlType::Date },
-        Some("NaiveDateTime") => quote! { ferrumec_admin::sql::SqlType::Timestamp },
-        Some("DateTime") => quote! { ferrumec_admin::sql::SqlType::Timestamptz },
-        Some("Decimal") => quote! { ferrumec_admin::sql::SqlType::Numeric },
+        Some("f32") => quote! { actixutils::viewset::SqlType::Float4 },
+        Some("f64") => quote! { actixutils::viewset::SqlType::Float8 },
+        Some("bool") => quote! { actixutils::viewset::SqlType::Bool },
+        Some("Uuid") => quote! { actixutils::viewset::SqlType::Uuid },
+        Some("NaiveDate") => quote! { actixutils::viewset::SqlType::Date },
+        Some("NaiveDateTime") => quote! { actixutils::viewset::SqlType::Timestamp },
+        Some("DateTime") => quote! { actixutils::viewset::SqlType::Timestamptz },
+        Some("Decimal") => quote! { actixutils::viewset::SqlType::Numeric },
         // serde_json::Value and anything unrecognized: treat as jsonb.
-        _ => quote! { ferrumec_admin::sql::SqlType::Json },
+        _ => quote! { actixutils::viewset::SqlType::Json },
     }
 }
 
