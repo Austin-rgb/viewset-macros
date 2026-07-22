@@ -1,6 +1,6 @@
 [package]
 name = "viewset-macros"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "proc-macro lib for actixutils viewset"
 license = "MIT"
