@@ -48,6 +48,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     };
 
     let mut pk_field: Option<Ident> = None;
+    let mut pk_ty: Option<syn::Type> = None;
     let mut columns = Vec::new();
     let mut searchable = Vec::new();
     let mut sortable = Vec::new();
@@ -64,6 +65,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         let attrs = FieldAttrs::parse(field);
         if attrs.pk {
             pk_field = Some(ident.clone());
+            pk_ty = Some(field.ty.clone());
         }
         if attrs.searchable {
             searchable.push(col_name.clone());
@@ -79,9 +81,32 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         }
     }
 
-    let pk_field = match pk_field {
-        Some(f) => f,
-        None => Ident::new("id", proc_macro2::Span::call_site()),
+    let (pk_field, pk_ty) = match (pk_field, pk_ty) {
+        (Some(f), Some(t)) => (f, t),
+        _ => {
+            // No explicit #[entity(pk)] — fall back to a field literally
+            // named `id`, using *its* declared type rather than assuming
+            // Uuid. Previously `type Id` was hardcoded to `uuid::Uuid`
+            // regardless of the actual pk field's type, which silently
+            // produced a non-compiling (or worse, semantically wrong)
+            // `impl Entity` for any entity with a non-Uuid primary key
+            // (i32/i64 auto-increment ids, etc.).
+            match fields
+                .named
+                .iter()
+                .find(|f| f.ident.as_ref().is_some_and(|i| i == "id"))
+            {
+                Some(f) => (f.ident.clone().expect("named field"), f.ty.clone()),
+                None => {
+                    return syn::Error::new_spanned(
+                        &input,
+                        "#[derive(Entity)] requires a field annotated #[entity(pk)], or a field named `id`",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            }
+        }
     };
     let pk_column = pk_field.to_string();
 
@@ -100,7 +125,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl actixutils::viewset::Entity for #name {
-            type Id = uuid::Uuid;
+            type Id = #pk_ty;
             type CreateDto = #create_ty;
             type UpdateDto = #update_ty;
             type ResponseDto = #response_ty;
@@ -116,7 +141,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             const SOFT_DELETE_COLUMN: Option<&'static str> = #soft_delete_tokens;
 
             fn id(&self) -> Self::Id {
-                self.#pk_field
+                self.#pk_field.clone()
             }
         }
     };
