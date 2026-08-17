@@ -133,7 +133,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             const TABLE: &'static str = #table;
             const PK_COLUMN: &'static str = #pk_column;
             const COLUMNS: &'static [&'static str] = &[#(#columns),*];
-            const FIELDS: &'static [actixutils::viewset::Field] =
+            const FIELDS: &'static [viewset::Field] =
                 &[#((#field_names, #field_types)),*];
             const SEARCHABLE: &'static [&'static str] = &[#(#searchable),*];
             const SORTABLE: &'static [&'static str] = &[#(#sortable),*];
@@ -162,23 +162,23 @@ fn sql_type_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
     };
 
     match last_ident.as_deref() {
-        Some("String") | Some("str") => quote! { actixutils::viewset::SqlType::Text },
+        Some("String") | Some("str") => quote! { viewset::SqlType::Text },
         Some("i8") | Some("i16") | Some("i32") | Some("u8") | Some("u16") | Some("u32") => {
-            quote! { actixutils::viewset::SqlType::Int4 }
+            quote! { viewset::SqlType::Int4 }
         }
         Some("i64") | Some("u64") | Some("isize") | Some("usize") => {
-            quote! { actixutils::viewset::SqlType::Int8 }
+            quote! { viewset::SqlType::Int8 }
         }
-        Some("f32") => quote! { actixutils::viewset::SqlType::Float4 },
-        Some("f64") => quote! { actixutils::viewset::SqlType::Float8 },
-        Some("bool") => quote! { actixutils::viewset::SqlType::Bool },
-        Some("Uuid") => quote! { actixutils::viewset::SqlType::Uuid },
-        Some("NaiveDate") => quote! { actixutils::viewset::SqlType::Date },
-        Some("NaiveDateTime") => quote! { actixutils::viewset::SqlType::Timestamp },
-        Some("DateTime") => quote! { actixutils::viewset::SqlType::Timestamptz },
-        Some("Decimal") => quote! { actixutils::viewset::SqlType::Numeric },
+        Some("f32") => quote! { viewset::SqlType::Float4 },
+        Some("f64") => quote! { viewset::SqlType::Float8 },
+        Some("bool") => quote! { viewset::SqlType::Bool },
+        Some("Uuid") => quote! { viewset::SqlType::Uuid },
+        Some("NaiveDate") => quote! { viewset::SqlType::Date },
+        Some("NaiveDateTime") => quote! { viewset::SqlType::Timestamp },
+        Some("DateTime") => quote! { viewset::SqlType::Timestamptz },
+        Some("Decimal") => quote! { viewset::SqlType::Numeric },
         // serde_json::Value and anything unrecognized: treat as jsonb.
-        _ => quote! { actixutils::viewset::SqlType::Json },
+        _ => quote! { viewset::SqlType::Json },
     }
 }
 
