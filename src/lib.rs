@@ -124,7 +124,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let field_types = field_entries.iter().map(|(_, t)| t);
 
     let expanded = quote! {
-        impl actixutils::viewset::Entity for #name {
+        impl viewset::Entity for #name {
             type Id = #pk_ty;
             type CreateDto = #create_ty;
             type UpdateDto = #update_ty;
