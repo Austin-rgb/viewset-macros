@@ -28,14 +28,14 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, LitStr};
+use syn::{Data, DeriveInput, Fields, Ident, LitStr, parse_macro_input};
 
 #[proc_macro_derive(Entity, attributes(entity))]
 pub fn derive_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-
     let container = ContainerAttrs::parse(&input);
+
     let Data::Struct(data) = &input.data else {
         return syn::Error::new_spanned(&input, "#[derive(Entity)] only supports structs")
             .to_compile_error()
@@ -50,11 +50,15 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let mut pk_field: Option<Ident> = None;
     let mut pk_ty: Option<syn::Type> = None;
     let mut columns = Vec::new();
+    let mut insert_idents = Vec::new(); // <--- these MUST exist on CreateDto
     let mut searchable = Vec::new();
     let mut sortable = Vec::new();
     let mut filterable = Vec::new();
     let mut soft_delete_col: Option<String> = None;
-    let mut field_entries = Vec::new(); // (column name, SqlType tokens) for FIELDS
+    let mut field_entries = Vec::new();
+
+    let mut placeholders = Vec::new();
+    let mut bind_idx = 1;
 
     for field in &fields.named {
         let ident = field.ident.clone().expect("named field");
@@ -63,6 +67,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         field_entries.push((col_name.clone(), sql_type_tokens(&field.ty)));
 
         let attrs = FieldAttrs::parse(field);
+
         if attrs.pk {
             pk_field = Some(ident.clone());
             pk_ty = Some(field.ty.clone());
@@ -79,37 +84,35 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         if attrs.soft_delete {
             soft_delete_col = Some(col_name.clone());
         }
+
+        // Only include in INSERT if it's not pk, not soft_delete, and not skipped for create
+        if !attrs.pk && !attrs.soft_delete && !attrs.skip_create {
+            insert_idents.push(ident.clone());
+            placeholders.push(format!("${}", bind_idx));
+            bind_idx += 1;
+        }
     }
 
     let (pk_field, pk_ty) = match (pk_field, pk_ty) {
         (Some(f), Some(t)) => (f, t),
-        _ => {
-            // No explicit #[entity(pk)] — fall back to a field literally
-            // named `id`, using *its* declared type rather than assuming
-            // Uuid. Previously `type Id` was hardcoded to `uuid::Uuid`
-            // regardless of the actual pk field's type, which silently
-            // produced a non-compiling (or worse, semantically wrong)
-            // `impl Entity` for any entity with a non-Uuid primary key
-            // (i32/i64 auto-increment ids, etc.).
-            match fields
-                .named
-                .iter()
-                .find(|f| f.ident.as_ref().is_some_and(|i| i == "id"))
-            {
-                Some(f) => (f.ident.clone().expect("named field"), f.ty.clone()),
-                None => {
-                    return syn::Error::new_spanned(
-                        &input,
-                        "#[derive(Entity)] requires a field annotated #[entity(pk)], or a field named `id`",
-                    )
-                    .to_compile_error()
-                    .into();
-                }
+        _ => match fields
+            .named
+            .iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == "id"))
+        {
+            Some(f) => (f.ident.clone().expect("named field"), f.ty.clone()),
+            None => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "#[derive(Entity)] requires a field annotated #[entity(pk)], or a field named `id`",
+                )
+                .to_compile_error()
+                .into();
             }
-        }
+        },
     };
-    let pk_column = pk_field.to_string();
 
+    let pk_column = pk_field.to_string();
     let table = container.table;
     let create_ty = container.create;
     let update_ty = container.update;
@@ -122,6 +125,13 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     let field_names = field_entries.iter().map(|(n, _)| n);
     let field_types = field_entries.iter().map(|(_, t)| t);
+    let insert_cols: Vec<String> = insert_idents.iter().map(|i| i.to_string()).collect();
+    let columns_str = insert_cols.join(", ");
+    let placeholders_str = placeholders.join(", ");
+    let insert_sql = format!(
+        "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
+        table, columns_str, placeholders_str
+    );
 
     let expanded = quote! {
         impl viewset::Entity for #name {
@@ -133,19 +143,22 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             const TABLE: &'static str = #table;
             const PK_COLUMN: &'static str = #pk_column;
             const COLUMNS: &'static [&'static str] = &[#(#columns),*];
-            const FIELDS: &'static [viewset::Field] =
-                &[#((#field_names, #field_types)),*];
+            const FIELDS: &'static [viewset::Field] = &[#((#field_names, #field_types)),*];
             const SEARCHABLE: &'static [&'static str] = &[#(#searchable),*];
             const SORTABLE: &'static [&'static str] = &[#(#sortable),*];
             const FILTERABLE: &'static [&'static str] = &[#(#filterable),*];
             const SOFT_DELETE_COLUMN: Option<&'static str> = #soft_delete_tokens;
 
-            fn id(&self) -> Self::Id {
-                self.#pk_field.clone()
+            fn id(&self) -> Self::Id { self.#pk_field.clone() }
+
+            async fn insert(dto: Self::CreateDto, pool: &::sqlx::PgPool) -> ::core::result::Result<Self, ::sqlx::Error> {
+                ::sqlx::query_as::<_, Self>(#insert_sql)
+                    #(.bind(&dto.#insert_idents))* // <--- GUARANTEED to be from CreateDto
+                    .fetch_one(pool)
+                    .await
             }
         }
     };
-
     expanded.into()
 }
 
@@ -248,6 +261,7 @@ struct FieldAttrs {
     sortable: bool,
     filterable: bool,
     soft_delete: bool,
+    skip_create: bool, // new
 }
 
 impl FieldAttrs {
@@ -268,7 +282,9 @@ impl FieldAttrs {
                     out.filterable = true;
                 } else if meta.path.is_ident("soft_delete") {
                     out.soft_delete = true;
-                }
+                } else if meta.path.is_ident("skip_create") {
+                    out.skip_create = true;
+                } // new
                 Ok(())
             });
         }
