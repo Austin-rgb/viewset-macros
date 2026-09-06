@@ -59,7 +59,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     let mut placeholders = Vec::new();
     let mut bind_idx = 1;
-
+    let mut update_idents = Vec::new();
     for field in &fields.named {
         let ident = field.ident.clone().expect("named field");
         let col_name = ident.to_string();
@@ -91,6 +91,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             placeholders.push(format!("${}", bind_idx));
             bind_idx += 1;
         }
+
+        if !attrs.pk && !attrs.soft_delete && !attrs.skip_update {
+            update_idents.push(ident.clone());
+        }
     }
 
     let (pk_field, pk_ty) = match (pk_field, pk_ty) {
@@ -115,7 +119,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let pk_column = pk_field.to_string();
     let table = container.table;
     let create_ty = container.create;
-    let update_ty = container.update;
+
     let response_ty = container.response;
 
     let soft_delete_tokens = match soft_delete_col {
@@ -132,6 +136,69 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
         table, columns_str, placeholders_str
     );
+
+    let select_all_sql = format!("SELECT * FROM {} WHERE {} = $1", table, pk_column);
+
+    let (update_ty, update_impl) = match &container.update {
+        Some(ty) => {
+            // existing per-field codegen from last message: update_idents,
+            // update_is_option, update_blocks, the QueryBuilder-based body.
+            (
+                quote! { #ty },
+                quote! {
+                    async fn update<'e, E>(
+                    id: &Self::Id,
+                    dto: Self::UpdateDto,
+                    exec: E,
+                ) -> ::core::result::Result<Option<Self>, ::sqlx::Error>
+                where
+                    E: ::sqlx::postgres::PgExecutor<'e> + Send,
+                {
+                    let mut qb: ::sqlx::QueryBuilder<::sqlx::Postgres> =
+                        ::sqlx::QueryBuilder::new(concat!("UPDATE ", #table, " SET "));
+                    let mut first = true;
+
+                    #(
+                        if let Some(v) = dto.#update_idents {
+                            if !first { qb.push(", "); }
+                            qb.push(concat!(stringify!(#update_idents), " = "));
+                            qb.push_bind(v);
+                            first = false;
+                        }
+                    )*
+
+                    if first {
+                        // Nothing to set — PATCH with no fields present is a no-op read.
+                        return ::sqlx::query_as::<_, Self>(#select_all_sql)
+                            .bind(id)
+                            .fetch_optional(exec)
+                            .await;
+                    }
+
+                    qb.push(concat!(" WHERE ", #pk_column, " = "));
+                    qb.push_bind(id.clone());
+                    qb.push(" RETURNING *");
+                    qb.build_query_as::<Self>().fetch_optional(exec).await
+                }
+                },
+            )
+        }
+        None => (
+            quote! { ::viewset::NoUpdateDto },
+            quote! {
+                async fn update<'e, E>(
+                    _id: &Self::Id,
+                    dto: Self::UpdateDto,
+                    _exec: E,
+                ) -> ::core::result::Result<Option<Self>, ::sqlx::Error>
+                where
+                    E: ::sqlx::postgres::PgExecutor<'e> + Send,
+                {
+                    match dto {} // NoUpdateDto is uninhabited — exhaustive, zero arms
+                }
+            },
+        ),
+    };
 
     let expanded = quote! {
         impl viewset::Entity for #name {
@@ -151,12 +218,17 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
             fn id(&self) -> Self::Id { self.#pk_field.clone() }
 
-            async fn insert(dto: Self::CreateDto, pool: &::sqlx::PgPool) -> ::core::result::Result<Self, ::sqlx::Error> {
-                ::sqlx::query_as::<_, Self>(#insert_sql)
-                    #(.bind(&dto.#insert_idents))* // <--- GUARANTEED to be from CreateDto
-                    .fetch_one(pool)
-                    .await
-            }
+            async fn insert<'e, E>(dto: Self::CreateDto, exec: E) -> ::core::result::Result<Self, ::sqlx::Error>
+        where
+            E: ::sqlx::postgres::PgExecutor<'e> + Send,
+        {
+            ::sqlx::query_as::<_, Self>(#insert_sql)
+                #(.bind(dto.#insert_idents))*
+                .fetch_one(exec)
+                .await
+        }
+
+         #update_impl
         }
     };
     expanded.into()
@@ -214,7 +286,7 @@ fn unwrap_option(ty: &syn::Type) -> Option<&syn::Type> {
 struct ContainerAttrs {
     table: String,
     create: Ident,
-    update: Ident,
+    update: Option<Ident>,
     response: Ident,
 }
 
@@ -248,7 +320,7 @@ impl ContainerAttrs {
         Self {
             table: table.unwrap_or_else(|| input.ident.to_string().to_lowercase() + "s"),
             create: create.unwrap_or_else(|| input.ident.clone()),
-            update: update.unwrap_or_else(|| input.ident.clone()),
+            update,
             response: response.unwrap_or_else(|| input.ident.clone()),
         }
     }
@@ -261,7 +333,8 @@ struct FieldAttrs {
     sortable: bool,
     filterable: bool,
     soft_delete: bool,
-    skip_create: bool, // new
+    skip_create: bool,
+    skip_update: bool,
 }
 
 impl FieldAttrs {
@@ -284,7 +357,9 @@ impl FieldAttrs {
                     out.soft_delete = true;
                 } else if meta.path.is_ident("skip_create") {
                     out.skip_create = true;
-                } // new
+                } else if meta.path.is_ident("skip_update") {
+                    out.skip_update = true;
+                }
                 Ok(())
             });
         }
