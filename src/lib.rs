@@ -17,7 +17,7 @@
 //!
 //! generates an `impl Entity for Product` wiring `TABLE`, `PK_COLUMN`,
 //! `COLUMNS`, `SEARCHABLE`, `SORTABLE`, `FILTERABLE`,
-//! `SOFT_DELETE_COLUMN` and `id()` from the annotations above. It does
+//! `SOFT_DELETE_COLUMN`, `SOFT_DELETE_IS_FLAG`, `insert`, `update` and `id()` from the annotations above. It does
 //! *not* generate `CreateDto`/`UpdateDto`/`ResponseDto` themselves — those
 //! are ordinary structs the developer writes (or derives separately);
 //! this macro only wires the type names together.
@@ -55,7 +55,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let mut sortable = Vec::new();
     let mut filterable = Vec::new();
     let mut soft_delete_col: Option<String> = None;
-    let mut field_entries = Vec::new();
+    let mut soft_delete_is_flag = false;
 
     let mut placeholders = Vec::new();
     let mut bind_idx = 1;
@@ -64,7 +64,6 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         let ident = field.ident.clone().expect("named field");
         let col_name = ident.to_string();
         columns.push(col_name.clone());
-        field_entries.push((col_name.clone(), sql_type_tokens(&field.ty)));
 
         let attrs = FieldAttrs::parse(field);
 
@@ -83,6 +82,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         }
         if attrs.soft_delete {
             soft_delete_col = Some(col_name.clone());
+            soft_delete_is_flag = matches!(
+                unwrap_option(&field.ty).unwrap_or(&field.ty),
+                syn::Type::Path(p) if p.path.is_ident("bool")
+            );
         }
 
         // Only include in INSERT if it's not pk, not soft_delete, and not skipped for create
@@ -127,8 +130,6 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         None => quote! { None },
     };
 
-    let field_names = field_entries.iter().map(|(n, _)| n);
-    let field_types = field_entries.iter().map(|(_, t)| t);
     let insert_cols: Vec<String> = insert_idents.iter().map(|i| i.to_string()).collect();
     let columns_str = insert_cols.join(", ");
     let placeholders_str = placeholders.join(", ");
@@ -150,7 +151,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     id: &Self::Id,
                     dto: Self::UpdateDto,
                     exec: E,
-                ) -> ::core::result::Result<Option<Self>, ::sqlx::Error>
+                ) -> ::core::result::Result<Self, ::sqlx::Error>
                 where
                     E: ::sqlx::postgres::PgExecutor<'e> + Send,
                 {
@@ -171,14 +172,14 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         // Nothing to set — PATCH with no fields present is a no-op read.
                         return ::sqlx::query_as::<_, Self>(#select_all_sql)
                             .bind(id)
-                            .fetch_optional(exec)
+                            .fetch_one(exec)
                             .await;
                     }
 
                     qb.push(concat!(" WHERE ", #pk_column, " = "));
                     qb.push_bind(id.clone());
                     qb.push(" RETURNING *");
-                    qb.build_query_as::<Self>().fetch_optional(exec).await
+                    qb.build_query_as::<Self>().fetch_one(exec).await
                 }
                 },
             )
@@ -190,7 +191,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     _id: &Self::Id,
                     dto: Self::UpdateDto,
                     _exec: E,
-                ) -> ::core::result::Result<Option<Self>, ::sqlx::Error>
+                ) -> ::core::result::Result<Self, ::sqlx::Error>
                 where
                     E: ::sqlx::postgres::PgExecutor<'e> + Send,
                 {
@@ -210,11 +211,11 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             const TABLE: &'static str = #table;
             const PK_COLUMN: &'static str = #pk_column;
             const COLUMNS: &'static [&'static str] = &[#(#columns),*];
-            const FIELDS: &'static [::viewset::Field] = &[#((#field_names, #field_types)),*];
             const SEARCHABLE: &'static [&'static str] = &[#(#searchable),*];
             const SORTABLE: &'static [&'static str] = &[#(#sortable),*];
             const FILTERABLE: &'static [&'static str] = &[#(#filterable),*];
             const SOFT_DELETE_COLUMN: Option<&'static str> = #soft_delete_tokens;
+            const SOFT_DELETE_IS_FLAG: bool = #soft_delete_is_flag;
 
             fn id(&self) -> Self::Id { self.#pk_field.clone() }
 
@@ -232,39 +233,6 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         }
     };
     expanded.into()
-}
-
-/// Maps a field's Rust type to the `SqlType` used to bind it, peeling one
-/// layer of `Option<T>` first (nullability is handled at the value level
-/// via `SqlValue::Null`, not encoded in `SqlType` itself). Falls back to
-/// `Json` for any type this table doesn't recognize — safer than guessing
-/// wrong and binding, say, a struct as text.
-fn sql_type_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
-    let inner = unwrap_option(ty).unwrap_or(ty);
-    let last_ident = match inner {
-        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        _ => None,
-    };
-
-    match last_ident.as_deref() {
-        Some("String") | Some("str") => quote! { ::viewset::SqlType::Text },
-        Some("i8") | Some("i16") | Some("i32") | Some("u8") | Some("u16") | Some("u32") => {
-            quote! { ::viewset::SqlType::Int4 }
-        }
-        Some("i64") | Some("u64") | Some("isize") | Some("usize") => {
-            quote! { ::viewset::SqlType::Int8 }
-        }
-        Some("f32") => quote! { ::viewset::SqlType::Float4 },
-        Some("f64") => quote! { ::viewset::SqlType::Float8 },
-        Some("bool") => quote! { ::viewset::SqlType::Bool },
-        Some("Uuid") => quote! { ::viewset::SqlType::Uuid },
-        Some("NaiveDate") => quote! { ::viewset::SqlType::Date },
-        Some("NaiveDateTime") => quote! { ::viewset::SqlType::Timestamp },
-        Some("DateTime") => quote! { ::viewset::SqlType::Timestamptz },
-        Some("Decimal") => quote! { ::viewset::SqlType::Numeric },
-        // serde_json::Value and anything unrecognized: treat as jsonb.
-        _ => quote! { ::viewset::SqlType::Json },
-    }
 }
 
 /// If `ty` is `Option<T>`, returns `T`; otherwise `None`.
